@@ -109,8 +109,11 @@ def generate_sitemaps(
     base_index_url: Optional[str] = None,
     gzip_enabled: bool = False,
     lastmod_datetime: bool = False,
+    ensure_trailing_slash: bool = False,
 ) -> List[Path]:
     df = read_pages_csv(pages_csv, keep_datetime=lastmod_datetime)
+    if ensure_trailing_slash:
+        df["url"] = df["url"].astype(str).apply(lambda u: u if u.endswith("/") or '.' in u.split('/')[-1] else (u + "/"))
     # optional changefreq/priority passthrough if present
     changefreqs = df["changefreq"].tolist() if "changefreq" in df.columns else [None] * len(df)
     priorities = df["priority"].tolist() if "priority" in df.columns else [None] * len(df)
@@ -121,12 +124,18 @@ def generate_sitemaps(
     created_files: List[Path] = []
 
     # generate urlset files
+    per_file_counts = []
     for i, batch in enumerate(chunked(rows, max_urls_per_file), start=1):
         urlset = _build_urlset(batch)
         tree = ET.ElementTree(urlset)
         file_path = out_dir_p / f"sitemap-{i}.xml"
         written = _write_xml(tree, file_path, gzip_enabled)
         created_files.append(written)
+        # gather simple summary: count and lastmod range
+        lm_values = [lm for _, lm, _, _ in batch if lm]
+        lm_min = min(lm_values) if lm_values else None
+        lm_max = max(lm_values) if lm_values else None
+        per_file_counts.append((written, len(batch), lm_min, lm_max))
 
     # generate index
     index = ET.Element(ET.QName(NSMAP["sitemap"], "sitemapindex"))
@@ -148,6 +157,8 @@ def generate_sitemaps(
     created_files.insert(0, written_index)
 
     print(f"Generated {len(created_files)-1} sitemaps + index at: {out_dir_p}")
+    for p, cnt, lm_min, lm_max in per_file_counts:
+        print(f" - {p.name}: {cnt} urls" + (f", lastmod [{lm_min}..{lm_max}]" if lm_min or lm_max else ""))
     return created_files
 
 
@@ -283,6 +294,7 @@ def main():
     p_gen.add_argument("--base_index_url", default=None, help="Base URL to prefix in sitemap index <loc>")
     p_gen.add_argument("--gzip", action="store_true")
     p_gen.add_argument("--lastmod_datetime", action="store_true")
+    p_gen.add_argument("--ensure_trailing_slash", action="store_true")
 
     p_val = sub.add_parser("validate", help="Validate a sitemap or sitemap index file")
     p_val.add_argument("--path", required=True)
@@ -297,7 +309,7 @@ def main():
 
     args = parser.parse_args()
     if args.cmd == "generate":
-        created = generate_sitemaps(args.pages, args.out_dir, args.max_urls, args.base_index_url, args.gzip, args.lastmod_datetime)
+        created = generate_sitemaps(args.pages, args.out_dir, args.max_urls, args.base_index_url, args.gzip, args.lastmod_datetime, args.ensure_trailing_slash)
         for p in created:
             print(p)
     elif args.cmd == "validate":

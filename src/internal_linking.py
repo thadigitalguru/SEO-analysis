@@ -9,11 +9,13 @@ Modes:
 Outputs: CSV with columns: source_url, source_title, candidate_url, candidate_title, score, suggested_anchor
 """
 import argparse
+import logging
 from typing import List, Optional, Tuple
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.neighbors import NearestNeighbors
 import numpy as np
+from src.utils import write_dataframe, utc_now_iso
 
 
 def load_pages(csv_path: str) -> pd.DataFrame:
@@ -67,6 +69,8 @@ def rank_candidates_for_target(
     top_k: int,
     exclude_url: Optional[str] = None,
     anchor_from_sentence: bool = False,
+    min_score: float = 0.0,
+    anchor_max_len: int = 120,
 ) -> pd.DataFrame:
     q_emb = model.encode([target_text], normalize_embeddings=True)
     distances, indices = nn.kneighbors(q_emb, n_neighbors=min(top_k + 5, len(corpus_texts)))
@@ -81,7 +85,7 @@ def rank_candidates_for_target(
             "score": float(1.0 - d),  # cosine similarity ~ 1 - distance
         }
         if anchor_from_sentence:
-            anchor = _best_anchor_sentence(model, q_emb, str(corpus_df.iloc[i].get("content", "")))
+            anchor = _best_anchor_sentence(model, q_emb, str(corpus_df.iloc[i].get("content", "")), max_len=anchor_max_len)
             if anchor:
                 row["suggested_anchor"] = anchor
         rows.append(row)
@@ -92,7 +96,7 @@ def rank_candidates_for_target(
         if "suggested_anchor" not in out.columns:
             out["suggested_anchor"] = out["candidate_title"].str.strip()
         # stable sort and rank
-        out = out.sort_values(by=["score", "candidate_url"], ascending=[False, True])
+        out = out[out["score"] >= float(min_score)].sort_values(by=["score", "candidate_url"], ascending=[False, True])
         out.insert(0, "rank", range(1, len(out) + 1))
     return out
 
@@ -105,6 +109,8 @@ def suggest_for_all(
     content_chars: int = 512,
     min_content_len: int = 0,
     anchor_from_sentence: bool = False,
+    min_score: float = 0.0,
+    anchor_max_len: int = 120,
 ):
     df = load_pages(pages_csv)
     # filter minimal content length if requested
@@ -118,15 +124,15 @@ def suggest_for_all(
     for idx, row in df.iterrows():
         target_text = texts[idx]
         candidates = rank_candidates_for_target(
-            model, emb, nn, texts, df, target_text, top_k=top_k, exclude_url=row["url"], anchor_from_sentence=anchor_from_sentence
+            model, emb, nn, texts, df, target_text, top_k=top_k, exclude_url=row["url"], anchor_from_sentence=anchor_from_sentence, min_score=min_score, anchor_max_len=anchor_max_len
         )
         candidates.insert(0, "source_url", row["url"])
         candidates.insert(1, "source_title", row["title"])
         all_rows.append(candidates)
 
     out = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
-    out.to_csv(output_csv, index=False)
-    print(f"Saved: {output_csv}")
+    out["generated_at_utc"] = utc_now_iso()
+    return out
 
 
 def suggest_for_target(
@@ -139,6 +145,8 @@ def suggest_for_target(
     content_chars: int = 512,
     min_content_len: int = 0,
     anchor_from_sentence: bool = False,
+    min_score: float = 0.0,
+    anchor_max_len: int = 120,
 ):
     df = load_pages(pages_csv)
     if min_content_len > 0:
@@ -164,12 +172,12 @@ def suggest_for_target(
         raise ValueError("Provide either --target_url or --target_topic")
 
     candidates = rank_candidates_for_target(
-        model, emb, nn, texts, df, target_text, top_k=top_k, exclude_url=exclude_url, anchor_from_sentence=anchor_from_sentence
+        model, emb, nn, texts, df, target_text, top_k=top_k, exclude_url=exclude_url, anchor_from_sentence=anchor_from_sentence, min_score=min_score, anchor_max_len=anchor_max_len
     )
     candidates.insert(0, "source_url", source_url)
     candidates.insert(1, "source_title", source_title)
-    candidates.to_csv(output_csv, index=False)
-    print(f"Saved: {output_csv}")
+    candidates["generated_at_utc"] = utc_now_iso()
+    return candidates
 
 
 if __name__ == "__main__":
@@ -184,6 +192,11 @@ if __name__ == "__main__":
     p_all.add_argument("--content_chars", type=int, default=512)
     p_all.add_argument("--min_content_len", type=int, default=0)
     p_all.add_argument("--anchor_from_sentence", action="store_true")
+    p_all.add_argument("--min_score", type=float, default=0.0)
+    p_all.add_argument("--anchor_max_len", type=int, default=120)
+    p_all.add_argument("--output_format", choices=["csv","jsonl","parquet"], default="csv")
+    p_all.add_argument("--overwrite", action="store_true")
+    p_all.add_argument("--verbose", action="store_true")
 
     p_one = sub.add_parser("target", help="Suggest for a single target page/topic")
     p_one.add_argument("--pages", default="data/pages.csv")
@@ -195,17 +208,29 @@ if __name__ == "__main__":
     p_one.add_argument("--content_chars", type=int, default=512)
     p_one.add_argument("--min_content_len", type=int, default=0)
     p_one.add_argument("--anchor_from_sentence", action="store_true")
+    p_one.add_argument("--min_score", type=float, default=0.0)
+    p_one.add_argument("--anchor_max_len", type=int, default=120)
+    p_one.add_argument("--output_format", choices=["csv","jsonl","parquet"], default="csv")
+    p_one.add_argument("--overwrite", action="store_true")
+    p_one.add_argument("--verbose", action="store_true")
 
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO if (getattr(args, "verbose", False)) else logging.WARNING)
     if args.mode == "batch":
-        suggest_for_all(
+        df_out = suggest_for_all(
             args.pages, args.output, args.model, args.top_k,
-            args.content_chars, args.min_content_len, args.anchor_from_sentence
+            args.content_chars, args.min_content_len, args.anchor_from_sentence,
+            args.min_score, args.anchor_max_len
         )
+        write_dataframe(df_out, args.output, fmt=args.output_format, overwrite=args.overwrite, float_format='%.6f')
+        print(f"Saved: {args.output}")
     else:
-        suggest_for_target(
+        df_out = suggest_for_target(
             args.pages, args.output, args.target_url, args.target_topic,
-            args.model, args.top_k, args.content_chars, args.min_content_len, args.anchor_from_sentence
+            args.model, args.top_k, args.content_chars, args.min_content_len, args.anchor_from_sentence,
+            args.min_score, args.anchor_max_len
         )
+        write_dataframe(df_out, args.output, fmt=args.output_format, overwrite=args.overwrite, float_format='%.6f')
+        print(f"Saved: {args.output}")
 
 

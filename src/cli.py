@@ -49,6 +49,11 @@ def main():
     p_link_all.add_argument("--content_chars", type=int, default=512)
     p_link_all.add_argument("--min_content_len", type=int, default=0)
     p_link_all.add_argument("--anchor_from_sentence", action="store_true")
+    p_link_all.add_argument("--min_score", type=float, default=0.0)
+    p_link_all.add_argument("--anchor_max_len", type=int, default=120)
+    p_link_all.add_argument("--output_format", choices=["csv","jsonl","parquet"], default="csv")
+    p_link_all.add_argument("--overwrite", action="store_true")
+    p_link_all.add_argument("--verbose", action="store_true")
 
     p_link_one = link_sub.add_parser("target")
     p_link_one.add_argument("--pages", required=True)
@@ -60,6 +65,11 @@ def main():
     p_link_one.add_argument("--content_chars", type=int, default=512)
     p_link_one.add_argument("--min_content_len", type=int, default=0)
     p_link_one.add_argument("--anchor_from_sentence", action="store_true")
+    p_link_one.add_argument("--min_score", type=float, default=0.0)
+    p_link_one.add_argument("--anchor_max_len", type=int, default=120)
+    p_link_one.add_argument("--output_format", choices=["csv","jsonl","parquet"], default="csv")
+    p_link_one.add_argument("--overwrite", action="store_true")
+    p_link_one.add_argument("--verbose", action="store_true")
 
     # Sitemaps
     p_sm = sub.add_parser("sitemaps", help="Sitemap utilities")
@@ -72,6 +82,7 @@ def main():
     p_sm_gen.add_argument("--base_index_url", default=None)
     p_sm_gen.add_argument("--gzip", action="store_true")
     p_sm_gen.add_argument("--lastmod_datetime", action="store_true")
+    p_sm_gen.add_argument("--ensure_trailing_slash", action="store_true")
 
     p_sm_val = sm_sub.add_parser("validate")
     p_sm_val.add_argument("--path", required=True)
@@ -100,12 +111,18 @@ def main():
         extract_entities(args.input, args.output, args.model)
     elif args.cmd == "links":
         if args.mode == "batch":
-            suggest_for_all(args.pages, args.output, args.model, args.top_k, args.content_chars, args.min_content_len, args.anchor_from_sentence)
+            df = suggest_for_all(args.pages, args.output, args.model, args.top_k, args.content_chars, args.min_content_len, args.anchor_from_sentence, args.min_score, args.anchor_max_len)
+            from src.utils import write_dataframe
+            write_dataframe(df, args.output, fmt=args.output_format, overwrite=args.overwrite, float_format='%.6f')
+            print(f"Saved: {args.output}")
         else:
-            suggest_for_target(args.pages, args.output, args.target_url, args.target_topic, args.model, args.top_k, args.content_chars, args.min_content_len, args.anchor_from_sentence)
+            df = suggest_for_target(args.pages, args.output, args.target_url, args.target_topic, args.model, args.top_k, args.content_chars, args.min_content_len, args.anchor_from_sentence, args.min_score, args.anchor_max_len)
+            from src.utils import write_dataframe
+            write_dataframe(df, args.output, fmt=args.output_format, overwrite=args.overwrite, float_format='%.6f')
+            print(f"Saved: {args.output}")
     elif args.cmd == "sitemaps":
         if args.sm_cmd == "generate":
-            generate_sitemaps(args.pages, args.out_dir, args.max_urls, args.base_index_url, args.gzip, args.lastmod_datetime)
+            generate_sitemaps(args.pages, args.out_dir, args.max_urls, args.base_index_url, args.gzip, args.lastmod_datetime, args.ensure_trailing_slash)
         elif args.sm_cmd == "validate":
             path, ok, msg = validate_sitemap_file(args.path)
             print(f"{path}\t{ok}\t{msg}")
