@@ -39,6 +39,20 @@ python -m src.extract_entities --input data/examples/serp_samples.csv --output d
 python -m src.semantic_search --csv data/examples/serp_samples.csv --query "marathon shoe tips for beginners"
 ```
 
+### Internal linking suggestions (embeddings-assisted)
+CSV input must include: `url,title,content`
+
+```bash
+# Suggest for every page (exclude self); writes top-N candidates per page
+python -m src.internal_linking batch --pages data/pages.csv --output data/internal_links_batch.csv --top_k 5
+
+# Suggest for a single target page (by URL)
+python -m src.internal_linking target --pages data/pages.csv --output data/internal_links_target.csv --target_url https://example.com/running-shoes
+
+# Or by topic text if the page is not in the CSV
+python -m src.internal_linking target --pages data/pages.csv --output data/internal_links_target.csv --target_topic "marathon training nutrition"
+```
+
 ### Model picks (CPU‑friendly-ish)
 - Zero‑shot intent: `facebook/bart-large-mnli` (accurate; slower) or a smaller MNLI model.
 - Embeddings: `sentence-transformers/all-MiniLM-L6-v2` (fast & high‑quality for size).
@@ -53,6 +67,7 @@ python -m src.semantic_search --csv data/examples/serp_samples.csv --query "mara
 - `data/examples/keywords_intent.csv` — zero‑shot intents.
 - `data/examples/keywords_clusters.csv` — cluster ids + representatives.
 - `data/examples/seo_titles_meta.csv` — generated titles and meta descriptions.
+- `data/internal_links_*.csv` — internal link candidates with anchor suggestions.
 
 ## Version control
 This repo includes a `.gitignore` to keep virtual envs and caches out of git. To save your work:
