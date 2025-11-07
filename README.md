@@ -83,6 +83,19 @@ python -m src.sitemap_utils validate --path public/sitemaps/sitemap.xml
 python -m src.sitemap_utils compare --sitemaps public/sitemaps/sitemap.xml --pages data/pages.csv --expand_index --timeout 10 --orphans_out reports/orphans.csv --rogues_out reports/rogues.csv
 ```
 
+### Core Web Vitals snapshot (PageSpeed Insights)
+Requires a Google PSI API key in env `GOOGLE_PSI_KEY` or pass `--api_key`.
+
+Input CSV must include: `url`
+
+```bash
+# Fetch CWV for a sample of URLs (mobile + desktop), concurrency 5
+export GOOGLE_PSI_KEY=your_key_here
+python -m src.psi_snapshot --urls_csv data/pages.csv --output_csv reports/psi_snapshot.csv --strategies mobile desktop --sample_n 50 --concurrency 5
+```
+
+Outputs columns: `url, strategy, overall_category, LCP/INP/CLS/FID/FCP/TTFB (values + categories)`. Field data (CrUX) is preferred; Lighthouse audits are used as fallback when field metrics are unavailable.
+
 ## Version control
 This repo includes a `.gitignore` to keep virtual envs and caches out of git. To save your work:
 ```bash
