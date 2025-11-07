@@ -33,6 +33,30 @@ def build_embeddings(texts: List[str], model_name: str) -> Tuple[SentenceTransfo
     return model, emb, nn
 
 
+def _best_anchor_sentence(
+    model: SentenceTransformer,
+    target_emb: np.ndarray,
+    content: str,
+    max_sentences: int = 20,
+    min_len: int = 8,
+    max_len: int = 120,
+) -> str:
+    # naive sentence split; avoids heavy deps
+    raw = [s.strip() for s in
+           content.replace("\n", " ").replace("?", ".").replace("!", ".").split(".")]
+    sentences = [s for s in raw if len(s) >= min_len][:max_sentences]
+    if not sentences:
+        return ""
+    sent_emb = model.encode(sentences, normalize_embeddings=True)
+    # cosine similarity ~ 1 - distance
+    # compute distances between target_emb and each sentence embedding
+    sims = 1.0 - np.dot(sent_emb, target_emb[0])
+    # np.dot here with normalized vectors yields cosine similarity directly
+    best_idx = int(np.argmax(sims))
+    anchor = sentences[best_idx][:max_len].strip()
+    return anchor
+
+
 def rank_candidates_for_target(
     model: SentenceTransformer,
     emb: np.ndarray,
@@ -42,6 +66,7 @@ def rank_candidates_for_target(
     target_text: str,
     top_k: int,
     exclude_url: Optional[str] = None,
+    anchor_from_sentence: bool = False,
 ) -> pd.DataFrame:
     q_emb = model.encode([target_text], normalize_embeddings=True)
     distances, indices = nn.kneighbors(q_emb, n_neighbors=min(top_k + 5, len(corpus_texts)))
@@ -50,16 +75,25 @@ def rank_candidates_for_target(
         url = corpus_df.iloc[i]["url"]
         if exclude_url and url == exclude_url:
             continue
-        rows.append({
+        row = {
             "candidate_url": url,
             "candidate_title": corpus_df.iloc[i]["title"],
             "score": float(1.0 - d),  # cosine similarity ~ 1 - distance
-        })
+        }
+        if anchor_from_sentence:
+            anchor = _best_anchor_sentence(model, q_emb, str(corpus_df.iloc[i].get("content", "")))
+            if anchor:
+                row["suggested_anchor"] = anchor
+        rows.append(row)
         if len(rows) >= top_k:
             break
     out = pd.DataFrame(rows)
     if not out.empty:
-        out["suggested_anchor"] = out["candidate_title"].str.strip()
+        if "suggested_anchor" not in out.columns:
+            out["suggested_anchor"] = out["candidate_title"].str.strip()
+        # stable sort and rank
+        out = out.sort_values(by=["score", "candidate_url"], ascending=[False, True])
+        out.insert(0, "rank", range(1, len(out) + 1))
     return out
 
 
@@ -68,17 +102,23 @@ def suggest_for_all(
     output_csv: str,
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
     top_k: int = 5,
+    content_chars: int = 512,
+    min_content_len: int = 0,
+    anchor_from_sentence: bool = False,
 ):
     df = load_pages(pages_csv)
-    # Represent each page by title + first 512 chars of content for practical relevance
-    texts = (df["title"].fillna("") + ". " + df["content"].fillna("").str.slice(0, 512)).tolist()
+    # filter minimal content length if requested
+    if min_content_len > 0:
+        df = df[df["content"].fillna("").str.len() >= min_content_len].reset_index(drop=True)
+    # Represent each page by title + first N chars of content for practical relevance
+    texts = (df["title"].fillna("") + ". " + df["content"].fillna("").str.slice(0, content_chars)).tolist()
     model, emb, nn = build_embeddings(texts, model_name)
 
     all_rows = []
     for idx, row in df.iterrows():
         target_text = texts[idx]
         candidates = rank_candidates_for_target(
-            model, emb, nn, texts, df, target_text, top_k=top_k, exclude_url=row["url"]
+            model, emb, nn, texts, df, target_text, top_k=top_k, exclude_url=row["url"], anchor_from_sentence=anchor_from_sentence
         )
         candidates.insert(0, "source_url", row["url"])
         candidates.insert(1, "source_title", row["title"])
@@ -96,9 +136,14 @@ def suggest_for_target(
     target_topic: Optional[str] = None,
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
     top_k: int = 5,
+    content_chars: int = 512,
+    min_content_len: int = 0,
+    anchor_from_sentence: bool = False,
 ):
     df = load_pages(pages_csv)
-    texts = (df["title"].fillna("") + ". " + df["content"].fillna("").str.slice(0, 512)).tolist()
+    if min_content_len > 0:
+        df = df[df["content"].fillna("").str.len() >= min_content_len].reset_index(drop=True)
+    texts = (df["title"].fillna("") + ". " + df["content"].fillna("").str.slice(0, content_chars)).tolist()
     model, emb, nn = build_embeddings(texts, model_name)
 
     if target_url:
@@ -119,7 +164,7 @@ def suggest_for_target(
         raise ValueError("Provide either --target_url or --target_topic")
 
     candidates = rank_candidates_for_target(
-        model, emb, nn, texts, df, target_text, top_k=top_k, exclude_url=exclude_url
+        model, emb, nn, texts, df, target_text, top_k=top_k, exclude_url=exclude_url, anchor_from_sentence=anchor_from_sentence
     )
     candidates.insert(0, "source_url", source_url)
     candidates.insert(1, "source_title", source_title)
@@ -136,6 +181,9 @@ if __name__ == "__main__":
     p_all.add_argument("--output", default="data/internal_links_batch.csv")
     p_all.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
     p_all.add_argument("--top_k", type=int, default=5)
+    p_all.add_argument("--content_chars", type=int, default=512)
+    p_all.add_argument("--min_content_len", type=int, default=0)
+    p_all.add_argument("--anchor_from_sentence", action="store_true")
 
     p_one = sub.add_parser("target", help="Suggest for a single target page/topic")
     p_one.add_argument("--pages", default="data/pages.csv")
@@ -144,11 +192,20 @@ if __name__ == "__main__":
     p_one.add_argument("--top_k", type=int, default=5)
     p_one.add_argument("--target_url", default=None)
     p_one.add_argument("--target_topic", default=None)
+    p_one.add_argument("--content_chars", type=int, default=512)
+    p_one.add_argument("--min_content_len", type=int, default=0)
+    p_one.add_argument("--anchor_from_sentence", action="store_true")
 
     args = parser.parse_args()
     if args.mode == "batch":
-        suggest_for_all(args.pages, args.output, args.model, args.top_k)
+        suggest_for_all(
+            args.pages, args.output, args.model, args.top_k,
+            args.content_chars, args.min_content_len, args.anchor_from_sentence
+        )
     else:
-        suggest_for_target(args.pages, args.output, args.target_url, args.target_topic, args.model, args.top_k)
+        suggest_for_target(
+            args.pages, args.output, args.target_url, args.target_topic,
+            args.model, args.top_k, args.content_chars, args.min_content_len, args.anchor_from_sentence
+        )
 
 

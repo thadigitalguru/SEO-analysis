@@ -44,10 +44,10 @@ CSV input must include: `url,title,content`
 
 ```bash
 # Suggest for every page (exclude self); writes top-N candidates per page
-python -m src.internal_linking batch --pages data/pages.csv --output data/internal_links_batch.csv --top_k 5
+python -m src.internal_linking batch --pages data/pages.csv --output data/internal_links_batch.csv --top_k 5 --content_chars 512 --min_content_len 50 --anchor_from_sentence
 
 # Suggest for a single target page (by URL)
-python -m src.internal_linking target --pages data/pages.csv --output data/internal_links_target.csv --target_url https://example.com/running-shoes
+python -m src.internal_linking target --pages data/pages.csv --output data/internal_links_target.csv --target_url https://example.com/running-shoes --anchor_from_sentence
 
 # Or by topic text if the page is not in the CSV
 python -m src.internal_linking target --pages data/pages.csv --output data/internal_links_target.csv --target_topic "marathon training nutrition"
@@ -74,13 +74,13 @@ CSV input for generation/compare must include: `url[,lastmod]`
 
 ```bash
 # Generate sitemaps split by N URLs + sitemap index
-python -m src.sitemap_utils generate --pages data/pages.csv --out_dir public/sitemaps --max_urls 50000 --base_index_url https://www.example.com/sitemaps/
+python -m src.sitemap_utils generate --pages data/pages.csv --out_dir public/sitemaps --max_urls 50000 --base_index_url https://www.example.com/sitemaps/ --lastmod_datetime
 
 # Validate a sitemap (or index) file
 python -m src.sitemap_utils validate --path public/sitemaps/sitemap.xml
 
 # Compare sitemap URLs vs canonical URL list (orphans/rogues)
-python -m src.sitemap_utils compare --sitemaps public/sitemaps/sitemap-1.xml public/sitemaps/sitemap-2.xml --pages data/pages.csv --orphans_out reports/orphans.csv --rogues_out reports/rogues.csv
+python -m src.sitemap_utils compare --sitemaps public/sitemaps/sitemap.xml --pages data/pages.csv --expand_index --timeout 10 --orphans_out reports/orphans.csv --rogues_out reports/rogues.csv
 ```
 
 ## Version control

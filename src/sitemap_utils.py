@@ -14,7 +14,6 @@ Outputs
 - Reports printed to stdout and optional CSV outputs for orphans/rogues
 """
 import argparse
-import csv
 import datetime as dt
 import gzip
 import os
@@ -24,6 +23,8 @@ from urllib.parse import urljoin
 import xml.etree.ElementTree as ET
 
 import pandas as pd
+from urllib.request import urlopen
+from urllib.error import URLError, HTTPError
 
 
 NSMAP = {
@@ -32,7 +33,7 @@ NSMAP = {
 ET.register_namespace("", NSMAP["sitemap"])  # default namespace
 
 
-def read_pages_csv(csv_path: str) -> pd.DataFrame:
+def read_pages_csv(csv_path: str, keep_datetime: bool = False) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     if "url" not in df.columns:
         raise ValueError("CSV must include a 'url' column")
@@ -40,7 +41,13 @@ def read_pages_csv(csv_path: str) -> pd.DataFrame:
     if "lastmod" in df.columns:
         def _norm(x):
             try:
-                return pd.to_datetime(x, errors="coerce").date().isoformat() if pd.notna(x) else None
+                ts = pd.to_datetime(x, errors="coerce") if pd.notna(x) else None
+                if ts is None or pd.isna(ts):
+                    return None
+                if keep_datetime:
+                    # use Zulu (no tz if ambiguous)
+                    return ts.strftime("%Y-%m-%dT%H:%M:%S")
+                return ts.date().isoformat()
             except Exception:
                 return None
         df["lastmod"] = df["lastmod"].apply(_norm)
@@ -58,15 +65,26 @@ def chunked(iterable: Iterable, size: int) -> Iterable[List]:
         yield batch
 
 
-def _build_urlset(url_rows: List[Tuple[str, Optional[str]]]) -> ET.Element:
+def _build_urlset(url_rows: List[Tuple[str, Optional[str], Optional[str], Optional[float]]]) -> ET.Element:
     urlset = ET.Element(ET.QName(NSMAP["sitemap"], "urlset"))
-    for loc, lastmod in url_rows:
+    for loc, lastmod, changefreq, priority in url_rows:
         url_el = ET.SubElement(urlset, ET.QName(NSMAP["sitemap"], "url"))
         loc_el = ET.SubElement(url_el, ET.QName(NSMAP["sitemap"], "loc"))
         loc_el.text = loc
         if lastmod:
             lm_el = ET.SubElement(url_el, ET.QName(NSMAP["sitemap"], "lastmod"))
             lm_el.text = lastmod
+        if changefreq:
+            cf_el = ET.SubElement(url_el, ET.QName(NSMAP["sitemap"], "changefreq"))
+            cf_el.text = str(changefreq)
+        if priority is not None:
+            try:
+                pr = float(priority)
+                if 0.0 <= pr <= 1.0:
+                    pr_el = ET.SubElement(url_el, ET.QName(NSMAP["sitemap"], "priority"))
+                    pr_el.text = f"{pr:.1f}"
+            except Exception:
+                pass
     return urlset
 
 
@@ -90,9 +108,14 @@ def generate_sitemaps(
     max_urls_per_file: int = 50000,
     base_index_url: Optional[str] = None,
     gzip_enabled: bool = False,
+    lastmod_datetime: bool = False,
 ) -> List[Path]:
-    df = read_pages_csv(pages_csv)
-    rows = list(zip(df["url"].tolist(), df["lastmod"].tolist() if "lastmod" in df.columns else [None] * len(df)))
+    df = read_pages_csv(pages_csv, keep_datetime=lastmod_datetime)
+    # optional changefreq/priority passthrough if present
+    changefreqs = df["changefreq"].tolist() if "changefreq" in df.columns else [None] * len(df)
+    priorities = df["priority"].tolist() if "priority" in df.columns else [None] * len(df)
+    lastmods = df["lastmod"].tolist() if "lastmod" in df.columns else [None] * len(df)
+    rows = list(zip(df["url"].tolist(), lastmods, changefreqs, priorities))
 
     out_dir_p = Path(out_dir)
     created_files: List[Path] = []
@@ -159,29 +182,81 @@ def validate_sitemap_file(path: str) -> Tuple[str, bool, str]:
         return path, False, "file not found"
 
 
-def compare_sitemap_vs_urls(sitemaps: List[str], urls_csv: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def _parse_xml_bytes(data: bytes) -> ET.Element:
+    return ET.fromstring(data)
+
+
+def _fetch_xml(url: str, timeout: int = 10) -> Optional[ET.Element]:
+    try:
+        with urlopen(url, timeout=timeout) as resp:
+            return _parse_xml_bytes(resp.read())
+    except (URLError, HTTPError, TimeoutError, ValueError):
+        return None
+
+
+def _collect_sitemap_urls_from_root(root: ET.Element) -> List[str]:
+    urls: List[str] = []
+    if root.tag.endswith("urlset"):
+        for u in root.findall("{http://www.sitemaps.org/schemas/sitemap/0.9}url"):
+            loc = u.find("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
+            if loc is not None and loc.text:
+                urls.append(loc.text.strip())
+    elif root.tag.endswith("sitemapindex"):
+        for s in root.findall("{http://www.sitemaps.org/schemas/sitemap/0.9}sitemap"):
+            loc = s.find("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
+            if loc is not None and loc.text:
+                urls.append(loc.text.strip())
+    return urls
+
+
+def compare_sitemap_vs_urls(
+    sitemaps: List[str],
+    urls_csv: str,
+    expand_index: bool = False,
+    timeout: int = 10,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     # gather all <loc> URLs from provided sitemap files
     sm_urls: List[str] = []
+    to_expand: List[str] = []
     for p in sitemaps:
         try:
-            # support .gz files
-            if p.endswith(".gz"):
-                with gzip.open(p, "rb") as f:
-                    root = ET.fromstring(f.read())
+            if p.startswith("http://") or p.startswith("https://"):
+                root = _fetch_xml(p, timeout=timeout)
+                if root is None:
+                    continue
             else:
-                root = ET.parse(p).getroot()
+                if p.endswith(".gz"):
+                    with gzip.open(p, "rb") as f:
+                        root = _parse_xml_bytes(f.read())
+                else:
+                    root = ET.parse(p).getroot()
         except Exception:
             continue
+        urls = _collect_sitemap_urls_from_root(root)
         if root.tag.endswith("urlset"):
-            for u in root.findall("{http://www.sitemaps.org/schemas/sitemap/0.9}url"):
-                loc = u.find("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
-                if loc is not None and loc.text:
-                    sm_urls.append(loc.text.strip())
-        elif root.tag.endswith("sitemapindex"):
-            for s in root.findall("{http://www.sitemaps.org/schemas/sitemap/0.9}sitemap"):
-                loc = s.find("{http://www.sitemaps.org/schemas/sitemap/0.9}loc")
-                if loc is not None and loc.text:
-                    sm_urls.append(loc.text.strip())
+            sm_urls.extend(urls)
+        else:
+            # sitemapindex
+            if expand_index:
+                to_expand.extend(urls)
+            else:
+                sm_urls.extend(urls)
+
+    # Expand index children if requested (best-effort)
+    if expand_index and to_expand:
+        for url in to_expand:
+            root = _fetch_xml(url, timeout=timeout) if (url.startswith("http://") or url.startswith("https://")) else None
+            if root is None:
+                # try local path
+                try:
+                    if url.endswith(".gz"):
+                        with gzip.open(url, "rb") as f:
+                            root = _parse_xml_bytes(f.read())
+                    else:
+                        root = ET.parse(url).getroot()
+                except Exception:
+                    continue
+            sm_urls.extend(_collect_sitemap_urls_from_root(root))
 
     df_urls = read_pages_csv(urls_csv)
     site_urls = set(df_urls["url"].astype(str).str.strip().tolist())
@@ -207,6 +282,7 @@ def main():
     p_gen.add_argument("--max_urls", type=int, default=50000)
     p_gen.add_argument("--base_index_url", default=None, help="Base URL to prefix in sitemap index <loc>")
     p_gen.add_argument("--gzip", action="store_true")
+    p_gen.add_argument("--lastmod_datetime", action="store_true")
 
     p_val = sub.add_parser("validate", help="Validate a sitemap or sitemap index file")
     p_val.add_argument("--path", required=True)
@@ -216,17 +292,19 @@ def main():
     p_cmp.add_argument("--pages", required=True, help="CSV with 'url[,lastmod]'")
     p_cmp.add_argument("--orphans_out", default=None)
     p_cmp.add_argument("--rogues_out", default=None)
+    p_cmp.add_argument("--expand_index", action="store_true", help="If a sitemap index is provided, fetch child sitemaps and expand page URLs")
+    p_cmp.add_argument("--timeout", type=int, default=10)
 
     args = parser.parse_args()
     if args.cmd == "generate":
-        created = generate_sitemaps(args.pages, args.out_dir, args.max_urls, args.base_index_url, args.gzip)
+        created = generate_sitemaps(args.pages, args.out_dir, args.max_urls, args.base_index_url, args.gzip, args.lastmod_datetime)
         for p in created:
             print(p)
     elif args.cmd == "validate":
         path, ok, msg = validate_sitemap_file(args.path)
         print(f"{path}\t{ok}\t{msg}")
     elif args.cmd == "compare":
-        orphan_df, rogue_df = compare_sitemap_vs_urls(args.sitemaps, args.pages)
+        orphan_df, rogue_df = compare_sitemap_vs_urls(args.sitemaps, args.pages, args.expand_index, args.timeout)
         print(f"Orphans: {len(orphan_df)}\tRogues: {len(rogue_df)}")
         if args.orphans_out:
             Path(args.orphans_out).parent.mkdir(parents=True, exist_ok=True)
