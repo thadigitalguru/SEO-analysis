@@ -96,6 +96,31 @@ python -m src.psi_snapshot --urls_csv data/pages.csv --output_csv reports/psi_sn
 
 Outputs columns: `url, strategy, overall_category, LCP/INP/CLS/FID/FCP/TTFB (values + categories)`. Field data (CrUX) is preferred; Lighthouse audits are used as fallback when field metrics are unavailable.
 
+### Schema.org JSON-LD generator/validator
+Generate and validate structured data for Article, Product, and FAQPage.
+
+CSV input columns vary by type:
+- **Article**: `url, headline, author` (required); `datePublished, dateModified, image, description, publisher` (optional)
+- **Product**: `url, name` (required); `description, image, price, priceCurrency, brand, sku` (optional)
+- **FAQPage**: `url, question, answer` (required; multiple rows per page grouped by URL)
+
+```bash
+# Generate JSON-LD from CSV
+python -m src.schema_org generate --csv data/articles.csv --type Article --output_dir public/schema
+python -m src.schema_org generate --csv data/products.csv --type Product --output_dir public/schema
+python -m src.schema_org generate --csv data/faqs.csv --type FAQPage --output_dir public/schema
+
+# Validate JSON-LD file(s)
+python -m src.schema_org validate --path public/schema/article_1.jsonld --type Article
+python -m src.schema_org validate --path public/schema/  # validates all .jsonld files in directory
+```
+
+Via CLI wrapper:
+```bash
+seo-tools schema generate --csv data/articles.csv --type Article --output_dir public/schema
+seo-tools schema validate --path public/schema/article_1.jsonld
+```
+
 ## Version control
 This repo includes a `.gitignore` to keep virtual envs and caches out of git. To save your work:
 ```bash

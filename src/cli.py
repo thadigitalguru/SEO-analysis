@@ -6,6 +6,7 @@ from src.extract_entities import extract_entities
 from src.internal_linking import suggest_for_all, suggest_for_target
 from src.sitemap_utils import generate_sitemaps, validate_sitemap_file, compare_sitemap_vs_urls
 from src.psi_snapshot import main as psi_main
+from src.schema_org import generate_from_csv, validate_jsonld
 
 
 def main():
@@ -99,6 +100,19 @@ def main():
     p_psi = sub.add_parser("psi", help="Core Web Vitals snapshot (PSI API)")
     # We will forward all args to psi_snapshot.main to avoid duplication
 
+    # Schema.org
+    p_schema = sub.add_parser("schema", help="Schema.org JSON-LD generator/validator")
+    schema_sub = p_schema.add_subparsers(dest="schema_cmd", required=True)
+
+    p_schema_gen = schema_sub.add_parser("generate")
+    p_schema_gen.add_argument("--csv", required=True)
+    p_schema_gen.add_argument("--type", choices=["Article", "Product", "FAQPage"], required=True)
+    p_schema_gen.add_argument("--output_dir", default="public/schema")
+
+    p_schema_val = schema_sub.add_parser("validate")
+    p_schema_val.add_argument("--path", required=True)
+    p_schema_val.add_argument("--type", choices=["Article", "Product", "FAQPage"], default=None)
+
     args, unknown = parser.parse_known_args()
 
     if args.cmd == "intent":
@@ -138,6 +152,38 @@ def main():
     elif args.cmd == "psi":
         # Delegate to psi module for full arg handling
         psi_main()
+    elif args.cmd == "schema":
+        if args.schema_cmd == "generate":
+            generate_from_csv(args.csv, args.type, args.output_dir)
+        elif args.schema_cmd == "validate":
+            from pathlib import Path
+            path = Path(args.path)
+            if path.is_file():
+                file_path, ok, errors = validate_jsonld(str(path), args.type)
+                if ok:
+                    print(f"{file_path}: OK")
+                else:
+                    print(f"{file_path}: FAILED")
+                    for e in errors:
+                        print(f"  - {e}")
+                    exit(1)
+            elif path.is_dir():
+                jsonld_files = list(path.glob("*.jsonld"))
+                all_ok = True
+                for f in jsonld_files:
+                    file_path, ok, errors = validate_jsonld(str(f), args.type)
+                    if ok:
+                        print(f"{file_path}: OK")
+                    else:
+                        all_ok = False
+                        print(f"{file_path}: FAILED")
+                        for e in errors:
+                            print(f"  - {e}")
+                if not all_ok:
+                    exit(1)
+            else:
+                print(f"Path not found: {args.path}")
+                exit(1)
     else:
         parser.print_help()
 
